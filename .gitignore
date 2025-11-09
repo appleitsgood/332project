@@ -1,5 +1,35 @@
-*.class
-*.log
+# sbt / Scala
+target/
+project/target/
+project/boot/
+project/project/
+project/.history/
 
-# virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
-hs_err_pid*
+# IDE
+.idea/
+*.iml
+*.iws
+.bsp/
+.bloop/
+.metals/
+.scala-build/
+.vscode/
+.out/
+
+# Logs / cache / temp
+*.log
+*.tmp
+tmp/
+.cache/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Build artifacts (usually not committed)
+*.jar
+*.zip
+
+# Docs temp files
+~$*
