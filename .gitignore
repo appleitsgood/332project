@@ -33,3 +33,10 @@ desktop.ini
 
 # Docs temp files
 ~$*
+
+# Test input / output data (gensort)
+input/
+output/
+
+# Local testing main class
+src/main/scala/TestLocalSort.scala
