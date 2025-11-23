@@ -16,3 +16,12 @@ message RegisterReply {
   bool ok = 1;
   string assignedId = 2;
 }
+
+message SampleChunk {
+  string workerId = 1;
+  bytes  data     = 2;
+}
+
+message SampleAck {
+  bool ok = 1;
+}
