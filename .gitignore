@@ -40,3 +40,6 @@ output/
 
 # Local testing main class
 src/main/scala/TestLocalSort.scala
+
+# .exe files
+*.exe

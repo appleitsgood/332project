@@ -4,6 +4,11 @@ package sorting.v1;
 
 service MasterService {
   rpc RegisterWorker(WorkerHello) returns (RegisterReply);
+  rpc SendSample(SampleChunk) returns (SampleAck);
+}
+
+service WorkerService {
+  rpc ReceivePartitionPlan(PartitionPlanMsg) returns (PartitionAck);
 }
 
 message WorkerHello {
@@ -15,4 +20,21 @@ message WorkerHello {
 message RegisterReply {
   bool ok = 1;
   string assignedId = 2;
+}
+
+message SampleChunk {
+  string workerId = 1;
+  bytes  data     = 2;
+}
+
+message SampleAck {
+  bool ok = 1;
+}
+
+message PartitionPlanMsg {
+  repeated bytes pivotKeys = 1;
+}
+
+message PartitionAck {
+  bool ok = 1;
 }
