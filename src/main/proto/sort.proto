@@ -9,6 +9,7 @@ service MasterService {
 
 service WorkerService {
   rpc ReceivePartitionPlan(PartitionPlanMsg) returns (PartitionAck);
+  rpc ReceivePartitionChunk(PartitionChunk) returns (PartitionChunkAck);
 }
 
 message WorkerHello {
@@ -31,10 +32,27 @@ message SampleAck {
   bool ok = 1;
 }
 
+message WorkerEndpoint {
+  string workerId = 1;
+  string host     = 2;
+  int32  port     = 3;
+}
+
 message PartitionPlanMsg {
   repeated bytes pivotKeys = 1;
+  repeated WorkerEndpoint endpoints = 2;
 }
 
 message PartitionAck {
+  bool ok = 1;
+}
+
+message PartitionChunk {
+  string fromWorkerId = 1;
+  int32  partitionIdx = 2;
+  bytes  data         = 3;
+}
+
+message PartitionChunkAck {
   bool ok = 1;
 }

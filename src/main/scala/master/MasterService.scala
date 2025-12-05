@@ -1,16 +1,15 @@
 package master
 
-import io.grpc.ServerBuilder
-import io.grpc.ManagedChannelBuilder
 import com.google.protobuf.ByteString
 
-import scala.concurrent.{ExecutionContext, Future, Await}
+import scala.concurrent.{Future, Await}
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration._
 
 import common.{PartitionPlan, Record}
+import network.{GrpcClients, GrpcServers}
 import sorting.Pivoter
-import sorting.v1.sort.{WorkerServiceGrpc, PartitionPlanMsg}
+import sorting.v1.sort.{WorkerServiceGrpc, PartitionPlanMsg, WorkerEndpoint}
 import sorting.v1.sort.{MasterServiceGrpc, RegisterReply, SampleAck, SampleChunk, WorkerHello}
 
 object MasterService {
@@ -23,10 +22,7 @@ object MasterService {
 
     val configuredPort = sys.props.get("port").map(_.toInt).getOrElse(0)
 
-    val server = ServerBuilder
-      .forPort(configuredPort)
-      .addService(MasterServiceGrpc.bindService(new Impl, ExecutionContext.global))
-      .build()
+    val server = GrpcServers.masterServer(configuredPort, new Impl)
       .start()
 
     val actualPort = server.getPort
@@ -129,18 +125,28 @@ object MasterService {
     val pivotKeys: Seq[ByteString] =
       plan.pivots.map(p => ByteString.copyFrom(p.key))
 
-    val msg = PartitionPlanMsg(pivotKeys = pivotKeys)
+    // 등록된 워커 목록 (등록 순서)
+    val workers = MasterState.allWorkers
 
-    MasterState.allWorkers.foreach { w =>
+    // partitionIdx = i 는 workers(i) 가 owner 라는 규칙
+    val endpoints: Seq[WorkerEndpoint] =
+      workers.map { w =>
+        WorkerEndpoint(
+          workerId = w.workerId,
+          host     = w.host,
+          port     = w.port
+        )
+      }
+
+    val msg = PartitionPlanMsg(
+      pivotKeys = pivotKeys,
+      endpoints = endpoints
+    )
+
+    workers.foreach { w =>
       println(s"[PLAN] sending PartitionPlan to worker ${w.workerId} at ${w.host}:${w.port}")
 
-      val ch =
-        ManagedChannelBuilder
-          .forAddress(w.host, w.port)
-          .usePlaintext()
-          .build()
-
-      val stub = WorkerServiceGrpc.stub(ch)
+      val (ch, stub) = GrpcClients.workerClient(w.host, w.port)
 
       try {
         val ack = Await.result(stub.receivePartitionPlan(msg), 5.seconds)
@@ -153,5 +159,6 @@ object MasterService {
       }
     }
   }
+
 
 }

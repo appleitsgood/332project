@@ -1,19 +1,14 @@
 package worker
 
-import io.grpc.{ManagedChannelBuilder, ServerBuilder}
 import scala.concurrent.Await
 import scala.concurrent.duration._
-import scala.concurrent.ExecutionContext
+import scala.concurrent.ExecutionContext.Implicits.global
 
 import com.google.protobuf.ByteString
 import common.Record
+import network.{GrpcClients, GrpcServers}
 import sorting.{Sorter, Sampler}
-import sorting.v1.sort.{
-  MasterServiceGrpc,
-  WorkerServiceGrpc,
-  WorkerHello,
-  SampleChunk
-}
+import sorting.v1.sort.{MasterServiceGrpc, WorkerServiceGrpc, WorkerHello, SampleChunk}
 
 object WorkerMain {
 
@@ -27,41 +22,29 @@ object WorkerMain {
     val masterPort = args(1).toInt
     val inputPath  = args(2)
 
-    val workerServer =
-      ServerBuilder
-        .forPort(0)
-        .addService(
-          WorkerServiceGrpc.bindService(
-            new WorkerService,
-            ExecutionContext.global
-          )
-        )
-        .build()
-        .start()
+    val workerServer = GrpcServers.workerServer(0, new WorkerService)
+      .start()
 
     val workerHost = java.net.InetAddress.getLocalHost.getHostAddress
     val workerPort = workerServer.getPort
     println(s"[WORKER] WorkerService listening on $workerHost:$workerPort")
 
-    val channel =
-      ManagedChannelBuilder
-        .forAddress(masterHost, masterPort)
-        .usePlaintext()
-        .build()
-
-    val masterStub = MasterServiceGrpc.stub(channel)
+    val (channel, masterStub) = GrpcClients.masterClient(masterHost, masterPort)
 
     val workerId = java.util.UUID.randomUUID().toString
+    WorkerState.setLocalWorkerId(workerId)
+
     val regReq   = WorkerHello(workerId, workerHost, workerPort)
 
-    val regRep =
-      Await.result(masterStub.registerWorker(regReq), 5.seconds)
+    val regRep = Await.result(masterStub.registerWorker(regReq), 5.seconds)
 
     println(s"[WORKER] registered: ok=${regRep.ok}, assignedId=${regRep.assignedId}")
 
 
     println(s"[WORKER] starting local sort for $inputPath")
     val sorted = Sorter.localSort(inputPath)
+
+    WorkerState.setSortedRecords(sorted)
     println(s"[WORKER] local sort done, records=${sorted.size}")
 
     val samples = Sampler.takeUniformSamples(sorted, targetSamples = 1000)
@@ -81,8 +64,7 @@ object WorkerMain {
       data     = ByteString.copyFrom(outBuf)
     )
 
-    val sampleRep =
-      Await.result(masterStub.sendSample(sampleReq), 5.seconds)
+    val sampleRep = Await.result(masterStub.sendSample(sampleReq), 5.seconds)
 
     println(s"[WORKER] sample sent: ok=${sampleRep.ok}")
 
