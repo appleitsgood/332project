@@ -5,12 +5,14 @@ import scala.concurrent.duration._
 import scala.concurrent.ExecutionContext.Implicits.global
 
 import com.google.protobuf.ByteString
-import common.Record
+import common.{Record, InputFiles}
 import network.{GrpcClients, GrpcServers}
-import sorting.{Sorter, Sampler}
+import sorting.Sampler
 import sorting.v1.sort.{WorkerHello, SampleChunk}
 
 object WorkerMain {
+  private val SampleBlockSizeBytes = 4 * 1024 * 1024
+  private val SampleCount          = 1000
 
   def main(args: Array[String]): Unit = {
     if (args.length < 5) {
@@ -73,6 +75,16 @@ object WorkerMain {
     WorkerState.setMasterEndpoint(masterHost, masterPort)
     WorkerState.setOutputDir(outputDir)
 
+    val inputFiles =
+      InputFiles.listInputFiles(inputPath).map(_.getAbsolutePath).toVector
+
+    if (inputFiles.isEmpty) {
+      System.err.println(s"No input files found at $inputPath")
+      System.exit(1)
+    }
+
+    WorkerState.setInputFiles(inputFiles)
+
     val workerServer = GrpcServers.workerServer(0, new WorkerService)
       .start()
 
@@ -92,15 +104,13 @@ object WorkerMain {
 
     println(s"[WORKER] registered: ok=${regRep.ok}, assignedId=${regRep.assignedId}")
 
-    println(s"[WORKER] starting local sort for $inputPath")
-    val sorted = Sorter.localSort(inputPath)
-
-    WorkerState.setSortedRecords(sorted)
-
-    println(s"[WORKER] local sort done, records=${sorted.size}")
-
-    val samples = Sampler.takeUniformSamples(sorted, targetSamples = 1000)
-    println(s"[WORKER] sampled ${samples.size} records")
+    println(s"[WORKER] starting streaming sample for $inputPath")
+    val samples = Sampler.sampleFromFiles(
+      paths        = inputFiles,
+      blockSize    = SampleBlockSizeBytes,
+      targetSamples = SampleCount
+    )
+    println(s"[WORKER] sampled ${samples.size} records (target=$SampleCount)")
 
     val outBuf = Record.encodeSeq(samples)
 

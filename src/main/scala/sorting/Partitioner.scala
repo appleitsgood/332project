@@ -5,6 +5,23 @@ import common.KeyOrdering
 
 object Partitioner {
 
+  def partitionIndex(record: Record, pivots: Vector[Record]): Int = {
+    var lo = 0
+    var hi = pivots.length
+
+    while (lo < hi) {
+      val mid = (lo + hi) >>> 1
+      val cmp = KeyOrdering.compare(record.key, pivots(mid).key)
+      if (cmp < 0) {
+        hi = mid
+      } else {
+        lo = mid + 1
+      }
+    }
+
+    lo
+  }
+
   def partitionByPivots(records: Seq[Record], pivots: Vector[Record]): Vector[Vector[Record]] = {
     implicit val ord = KeyOrdering.recordOrdering
 

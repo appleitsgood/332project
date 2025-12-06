@@ -9,12 +9,15 @@ import java.nio.file.{Files, Paths}
 
 import com.google.protobuf.ByteString
 import common.{PartitionPlan, Record}
-import common.KeyOrdering._
 import network.GrpcClients
 import sorting.Partitioner
+import common.RecordStream
+import common.KeyOrdering._
 import sorting.v1.sort.{WorkerServiceGrpc, PartitionPlanMsg, PartitionAck, PartitionChunk, PartitionChunkAck, StartMergeMsg, StartMergeAck, ShuffleDone, ShuffleDoneAck}
 
 class WorkerService extends WorkerServiceGrpc.WorkerService {
+  private val ShuffleChunkBytes   = 4 * 1024 * 1024
+  private val RecordSize          = Record.RecordSize
 
   override def receivePartitionPlan(req: PartitionPlanMsg): Future[PartitionAck] = {
     val pivots: Vector[Record] =
@@ -45,50 +48,87 @@ class WorkerService extends WorkerServiceGrpc.WorkerService {
 
     println(s"[WORKER] received PartitionPlan: pivots=${pivots.size}, numPartitions=${plan.numPartitions}")
 
-    WorkerState.getSortedRecords.foreach { recs =>
-      val buckets = Partitioner.partitionByPivots(recs, pivots)
-      val sizes   = buckets.map(_.size)
-      println(s"[WORKER] partitioned into ${buckets.size} buckets, sizes=$sizes")
-
-      if (buckets.size != plan.numPartitions) {
-        println(s"[WORKER] WARNING: buckets.size=${buckets.size} != plan.numPartitions=${plan.numPartitions}")
-      }
-
-      doShuffle(buckets)
-    }
+    streamShuffle(inputFiles = WorkerState.getInputFiles, pivots = pivots, plan = plan)
 
     notifyShuffleDoneToMaster()
     Future.successful(PartitionAck(ok = true))
   }
 
-  private def doShuffle(buckets: Vector[Seq[Record]]): Unit = {
+  private def streamShuffle(inputFiles: Vector[String], pivots: Vector[Record], plan: PartitionPlan): Unit = {
     val selfIdOpt = WorkerState.getLocalWorkerId
     val selfId    = selfIdOpt.getOrElse {
       println("[WORKER] WARNING: localWorkerId is not set; using 'unknown'")
       "unknown"
     }
 
-    buckets.zipWithIndex.foreach { case (bucket, partIdx) =>
-      if (bucket.nonEmpty) {
-        WorkerState.ownerOfPartition(partIdx) match {
-          case Some(owner) if owner.workerId == selfId =>
-            WorkerState.addPartitionChunk(partIdx, bucket.toVector)
-            println(s"[SHUFFLE] kept local partitionIdx=$partIdx, records=${bucket.size}")
+    if (inputFiles.isEmpty) {
+      println("[WORKER] WARNING: no input files set; skipping shuffle")
+      return
+    }
 
-          case Some(owner) =>
-            sendPartitionChunk(owner.host, owner.port, selfId, partIdx, bucket)
+    val numPartitions = plan.numPartitions
+    if (WorkerState.allWorkers.isEmpty) {
+      println("[WORKER] WARNING: no worker endpoints; cannot shuffle")
+      return
+    }
 
-          case None =>
-            println(s"[SHUFFLE] WARNING: no owner for partitionIdx=$partIdx; skipping")
-        }
+    val buffers: Array[scala.collection.mutable.Builder[Record, Vector[Record]]] =
+      new Array[scala.collection.mutable.Builder[Record, Vector[Record]]](numPartitions)
+    val counts = Array.fill(numPartitions)(0)
+
+    var bufferIndex = 0
+    while (bufferIndex < numPartitions) {
+      buffers(bufferIndex) = Vector.newBuilder[Record]
+      bufferIndex += 1
+    }
+
+    RecordStream.forEachRecord(inputFiles, ShuffleChunkBytes, warnOnPartial = true) { record =>
+      val partitionIndex = Partitioner.partitionIndex(record, pivots)
+      buffers(partitionIndex) += record
+      counts(partitionIndex) += 1
+      if (counts(partitionIndex) * RecordSize >= ShuffleChunkBytes) {
+        flushPartition(partitionIndex, buffers, counts, selfId)
       }
     }
+
+    var partitionIndex = 0
+    while (partitionIndex < numPartitions) {
+      if (counts(partitionIndex) > 0) {
+        flushPartition(partitionIndex, buffers, counts, selfId)
+      }
+      partitionIndex += 1
+    }
+  }
+
+  private def flushPartition(partitionIndex: Int,
+                             buffers: Array[scala.collection.mutable.Builder[Record, Vector[Record]]],
+                             counts: Array[Int],
+                             selfId: String): Unit = {
+
+    val chunk = buffers(partitionIndex).result()
+
+    if (chunk.nonEmpty) {
+      WorkerState.ownerOfPartition(partitionIndex) match {
+        case Some(owner) if owner.workerId == selfId =>
+          WorkerState.addPartitionChunk(partitionIndex, chunk)
+          println(s"[SHUFFLE] kept local partitionIdx=$partitionIndex, records=${chunk.size}")
+
+        case Some(owner) =>
+          sendPartitionChunk(owner.host, owner.port, selfId, partitionIndex, chunk)
+
+        case None =>
+          println(s"[SHUFFLE] WARNING: no owner for partitionIdx=$partitionIndex; dropping ${chunk.size} records")
+      }
+    }
+
+    buffers(partitionIndex).clear()
+    counts(partitionIndex) = 0
   }
 
   private def sendPartitionChunk(host: String,
                                  port: Int,
                                  fromWorkerId: String,
-                                 partIdx: Int,
+                                 partitionIndex: Int,
                                  records: Seq[Record]): Unit = {
 
     val outBuf = Record.encodeSeq(records)
@@ -98,28 +138,28 @@ class WorkerService extends WorkerServiceGrpc.WorkerService {
     try {
       val req = PartitionChunk(
         fromWorkerId = fromWorkerId,
-        partitionIdx = partIdx,
+        partitionIdx = partitionIndex,
         data         = ByteString.copyFrom(outBuf)
       )
 
       val ack = Await.result(stub.receivePartitionChunk(req), 30.seconds)
-      println(s"[SHUFFLE] sent partitionIdx=$partIdx, records=${records.size} " +
+      println(s"[SHUFFLE] sent partitionIdx=$partitionIndex, records=${records.size} " +
         s"to $host:$port (from=$fromWorkerId), ack.ok=${ack.ok}")
 
     } catch {
       case e: Throwable =>
-        println(s"[SHUFFLE] ERROR: failed to send partitionIdx=$partIdx to $host:$port: ${e.getMessage}")
+        println(s"[SHUFFLE] ERROR: failed to send partitionIdx=$partitionIndex to $host:$port: ${e.getMessage}")
     } finally {
       ch.shutdownNow()
     }
   }
 
   override def receivePartitionChunk(req: PartitionChunk): Future[PartitionChunkAck] = {
-    val recs: Vector[Record] = Record.decodeBytes(req.data.toByteArray)
-    WorkerState.addPartitionChunk(req.partitionIdx, recs)
+    val records: Vector[Record] = Record.decodeBytes(req.data.toByteArray)
+    WorkerState.addPartitionChunk(req.partitionIdx, records)
 
     println(s"[WORKER] received PartitionChunk from=${req.fromWorkerId}, " +
-      s"partitionIdx=${req.partitionIdx}, records=${recs.size}")
+      s"partitionIdx=${req.partitionIdx}, records=${records.size}")
 
     Future.successful(PartitionChunkAck(ok = true))
   }
@@ -208,14 +248,14 @@ class WorkerService extends WorkerServiceGrpc.WorkerService {
       return
     }
 
-    ownedPartitions.sorted.foreach { partIdx =>
-      val recs: Vector[Record] = WorkerState.getPartition(partIdx)
-      val sorted = recs.sorted
+    ownedPartitions.sorted.foreach { partitionIndex =>
+      val records: Vector[Record] = WorkerState.getPartition(partitionIndex)
+      val sorted = records.sorted
 
-      val filePath = outPath.resolve(s"partition.$partIdx").toString
+      val filePath = outPath.resolve(s"partition.$partitionIndex").toString
       Record.writeFile(filePath, sorted)
 
-      println(s"[MERGE] wrote ${sorted.size} records to $filePath (partitionIdx=$partIdx)")
+      println(s"[MERGE] wrote ${sorted.size} records to $filePath (partitionIdx=$partitionIndex)")
     }
   }
 }
