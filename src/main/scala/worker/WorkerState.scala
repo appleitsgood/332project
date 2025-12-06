@@ -10,6 +10,8 @@ object WorkerState {
   @volatile private var receivedPartitions: Map[Int, Vector[Record]]   = Map.empty
   @volatile private var localWorkerId: Option[String]                = None
   @volatile private var workerEndpoints: Vector[RemoteWorkerInfo]      = Vector.empty
+  @volatile private var outputDir: Option[String]                    = None
+  @volatile private var masterEndpoint: Option[(String, Int)]        = None
 
   def setSortedRecords(recs: Seq[Record]): Unit = synchronized {
     sortedRecords = Some(recs)
@@ -43,4 +45,14 @@ object WorkerState {
   def numWorkers: Int = workerEndpoints.size
 
   def ownerOfPartition(idx: Int): Option[RemoteWorkerInfo] = workerEndpoints.lift(idx)
+
+  def setMasterEndpoint(host: String, port: Int): Unit = synchronized {
+    masterEndpoint = Some(host -> port)
+  }
+  def getMasterEndpoint: Option[(String, Int)] = masterEndpoint
+
+  def setOutputDir(dir: String): Unit = synchronized {
+    outputDir = Some(dir)
+  }
+  def getOutputDir: Option[String] = outputDir
 }

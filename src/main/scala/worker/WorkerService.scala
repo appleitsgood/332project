@@ -5,16 +5,18 @@ import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Await
 import scala.concurrent.duration._
 
+import java.nio.file.{Files, Paths}
+
 import com.google.protobuf.ByteString
 import common.{PartitionPlan, Record}
+import common.KeyOrdering._
 import network.GrpcClients
 import sorting.Partitioner
-import sorting.v1.sort.{WorkerServiceGrpc, PartitionPlanMsg, PartitionAck, PartitionChunk, PartitionChunkAck}
+import sorting.v1.sort.{WorkerServiceGrpc, PartitionPlanMsg, PartitionAck, PartitionChunk, PartitionChunkAck, StartMergeMsg, StartMergeAck, ShuffleDone, ShuffleDoneAck}
 
 class WorkerService extends WorkerServiceGrpc.WorkerService {
 
   override def receivePartitionPlan(req: PartitionPlanMsg): Future[PartitionAck] = {
-    // 1) pivots 복원
     val pivots: Vector[Record] =
       req.pivotKeys.map { bs =>
         val key      = bs.toByteArray
@@ -25,7 +27,6 @@ class WorkerService extends WorkerServiceGrpc.WorkerService {
     val plan = PartitionPlan.fromPivots(pivots)
     WorkerState.setPartitionPlan(plan)
 
-    // 2) endpoints → RemoteWorkerInfo 로 변환해서 저장
     if (req.endpoints.nonEmpty) {
       val workers: Vector[RemoteWorkerInfo] =
         req.endpoints.map { e =>
@@ -49,15 +50,14 @@ class WorkerService extends WorkerServiceGrpc.WorkerService {
       val sizes   = buckets.map(_.size)
       println(s"[WORKER] partitioned into ${buckets.size} buckets, sizes=$sizes")
 
-      // numPartitions와 buckets 크기 불일치 시 경고
       if (buckets.size != plan.numPartitions) {
         println(s"[WORKER] WARNING: buckets.size=${buckets.size} != plan.numPartitions=${plan.numPartitions}")
       }
 
-      // 실제 shuffle
       doShuffle(buckets)
     }
 
+    notifyShuffleDoneToMaster()
     Future.successful(PartitionAck(ok = true))
   }
 
@@ -69,20 +69,16 @@ class WorkerService extends WorkerServiceGrpc.WorkerService {
     }
 
     buckets.zipWithIndex.foreach { case (bucket, partIdx) =>
-      // 빈 버킷은 skip
       if (bucket.nonEmpty) {
         WorkerState.ownerOfPartition(partIdx) match {
           case Some(owner) if owner.workerId == selfId =>
-            // 1) 내가 담당인 파티션이면, 바로 로컬에 쌓는다.
             WorkerState.addPartitionChunk(partIdx, bucket.toVector)
             println(s"[SHUFFLE] kept local partitionIdx=$partIdx, records=${bucket.size}")
 
           case Some(owner) =>
-            // 2) 다른 워커에게 보내야 하는 파티션이라면 RPC 호출
             sendPartitionChunk(owner.host, owner.port, selfId, partIdx, bucket)
 
           case None =>
-            // 매핑 정보가 없으면 경고만
             println(s"[SHUFFLE] WARNING: no owner for partitionIdx=$partIdx; skipping")
         }
       }
@@ -95,14 +91,7 @@ class WorkerService extends WorkerServiceGrpc.WorkerService {
                                  partIdx: Int,
                                  records: Seq[Record]): Unit = {
 
-    val recSize = Record.RecordSize
-    val outBuf  = new Array[Byte](records.size * recSize)
-    var i       = 0
-    records.foreach { r =>
-      val bytes = Record.toBytes(r)
-      System.arraycopy(bytes, 0, outBuf, i * recSize, recSize)
-      i += 1
-    }
+    val outBuf = Record.encodeSeq(records)
 
     val (ch, stub) = GrpcClients.workerClient(host, port)
 
@@ -126,24 +115,107 @@ class WorkerService extends WorkerServiceGrpc.WorkerService {
   }
 
   override def receivePartitionChunk(req: PartitionChunk): Future[PartitionChunkAck] = {
-    val bytes   = req.data.toByteArray
-    val recSize = Record.RecordSize
-    val count   = bytes.length / recSize
-
-    val buf = Vector.newBuilder[Record]
-    var i   = 0
-    while (i < count) {
-      val slice = java.util.Arrays.copyOfRange(bytes, i * recSize, (i + 1) * recSize)
-      buf += Record.fromBytes(slice)
-      i += 1
-    }
-    val recs = buf.result()
-
+    val recs: Vector[Record] = Record.decodeBytes(req.data.toByteArray)
     WorkerState.addPartitionChunk(req.partitionIdx, recs)
 
     println(s"[WORKER] received PartitionChunk from=${req.fromWorkerId}, " +
       s"partitionIdx=${req.partitionIdx}, records=${recs.size}")
 
     Future.successful(PartitionChunkAck(ok = true))
+  }
+
+  private def notifyShuffleDoneToMaster(): Unit = {
+    val maybeEndpoint = WorkerState.getMasterEndpoint
+    val maybeId       = WorkerState.getLocalWorkerId
+
+    (maybeEndpoint, maybeId) match {
+      case (Some((host, port)), Some(workerId)) =>
+        val (ch, stub) = GrpcClients.masterClient(host, port)
+        try {
+          val req = ShuffleDone(workerId = workerId)
+          val ack = Await.result(stub.notifyShuffleDone(req), 30.seconds)
+          println(s"[BARRIER] notified master of shuffle done, ack.ok=${ack.ok}")
+        } catch {
+          case e: Throwable =>
+            println(s"[BARRIER] failed to notify master of shuffle done: ${e.getMessage}")
+        } finally {
+          ch.shutdownNow()
+        }
+      case _ =>
+        println("[BARRIER] WARNING: master endpoint or local workerId not set; cannot notify shuffle done")
+    }
+  }
+
+  override def startMerge(req: StartMergeMsg): Future[StartMergeAck] = {
+    println("[MERGE] StartMerge received. Merging owned partitions and writing output files...")
+
+    val fut: Future[StartMergeAck] = Future {
+      try {
+        mergeAndWriteOutputs()
+        println("[MERGE] done.")
+        StartMergeAck(ok = true)
+      } catch {
+        case e: Throwable =>
+          println(s"[MERGE] ERROR during merge: ${e.getMessage}")
+          StartMergeAck(ok = false)
+      }
+    }
+
+    fut.andThen { case _ =>
+      println("[MERGE] worker shutting down.")
+      Thread.sleep(100)
+      System.exit(0)
+    }
+
+    fut
+  }
+
+  private def mergeAndWriteOutputs(): Unit = {
+    val outDirOpt = WorkerState.getOutputDir
+    val selfIdOpt = WorkerState.getLocalWorkerId
+    val planOpt = WorkerState.getPartitionPlan
+
+    if (outDirOpt.isEmpty) {
+      println("[MERGE] WARNING: outputDir is not set; skip merge.")
+      return
+    }
+    if (selfIdOpt.isEmpty) {
+      println("[MERGE] WARNING: localWorkerId is not set; skip merge.")
+      return
+    }
+    if (planOpt.isEmpty) {
+      println("[MERGE] WARNING: partitionPlan is not set; skip merge.")
+      return
+    }
+
+    val outputDir = outDirOpt.get
+    val selfId = selfIdOpt.get
+    val plan = planOpt.get
+
+    val outPath = Paths.get(outputDir)
+    Files.createDirectories(outPath)
+
+    val ownedPartitions: Seq[Int] =
+      (0 until plan.numPartitions).flatMap { idx =>
+        WorkerState.ownerOfPartition(idx) match {
+          case Some(owner) if owner.workerId == selfId => Some(idx)
+          case _ => None
+        }
+      }
+
+    if (ownedPartitions.isEmpty) {
+      println(s"[MERGE] WARNING: no owned partitions for workerId=$selfId")
+      return
+    }
+
+    ownedPartitions.sorted.foreach { partIdx =>
+      val recs: Vector[Record] = WorkerState.getPartition(partIdx)
+      val sorted = recs.sorted
+
+      val filePath = outPath.resolve(s"partition.$partIdx").toString
+      Record.writeFile(filePath, sorted)
+
+      println(s"[MERGE] wrote ${sorted.size} records to $filePath (partitionIdx=$partIdx)")
+    }
   }
 }

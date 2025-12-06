@@ -9,12 +9,14 @@ object MasterState {
   @volatile private var expectedWorkers: Option[Int]           = None
   @volatile private var samples: Map[String, Vector[Record]]   = Map.empty
   @volatile private var partitionPlan: Option[PartitionPlan]   = None
+  @volatile private var shuffleDone: Set[String]               = Set.empty
 
   def init(expected: Option[Int]): Unit = synchronized {
     expectedWorkers = expected
     workers        = Vector.empty
     samples        = Map.empty
     partitionPlan  = None
+    shuffleDone    = Set.empty
   }
 
   def addWorker(w: WorkerInfo): Int = synchronized {
@@ -37,4 +39,13 @@ object MasterState {
     partitionPlan = Some(plan)
   }
   def getPartitionPlan: Option[PartitionPlan] = partitionPlan
+
+  def markShuffleDone(workerId: String): Unit = synchronized {
+    shuffleDone = shuffleDone + workerId
+  }
+
+  def shuffleDoneCount: Int = shuffleDone.size
+
+  def allShuffleDone: Boolean =
+    expectedWorkers.exists(total => shuffleDone.size == total)
 }

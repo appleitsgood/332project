@@ -5,11 +5,13 @@ package sorting.v1;
 service MasterService {
   rpc RegisterWorker(WorkerHello) returns (RegisterReply);
   rpc SendSample(SampleChunk) returns (SampleAck);
+  rpc NotifyShuffleDone(ShuffleDone) returns (ShuffleDoneAck);
 }
 
 service WorkerService {
   rpc ReceivePartitionPlan(PartitionPlanMsg) returns (PartitionAck);
   rpc ReceivePartitionChunk(PartitionChunk) returns (PartitionChunkAck);
+  rpc StartMerge(StartMergeMsg) returns (StartMergeAck);
 }
 
 message WorkerHello {
@@ -54,5 +56,20 @@ message PartitionChunk {
 }
 
 message PartitionChunkAck {
+  bool ok = 1;
+}
+
+message ShuffleDone {
+  string workerId = 1;
+}
+
+message ShuffleDoneAck {
+  bool ok = 1;
+}
+
+message StartMergeMsg {
+}
+
+message StartMergeAck {
   bool ok = 1;
 }

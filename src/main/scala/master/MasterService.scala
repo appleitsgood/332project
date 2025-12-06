@@ -9,8 +9,8 @@ import scala.concurrent.duration._
 import common.{PartitionPlan, Record}
 import network.{GrpcClients, GrpcServers}
 import sorting.Pivoter
-import sorting.v1.sort.{WorkerServiceGrpc, PartitionPlanMsg, WorkerEndpoint}
-import sorting.v1.sort.{MasterServiceGrpc, RegisterReply, SampleAck, SampleChunk, WorkerHello}
+import sorting.v1.sort.{WorkerServiceGrpc, PartitionPlanMsg, WorkerEndpoint, StartMergeMsg, StartMergeAck}
+import sorting.v1.sort.{MasterServiceGrpc, RegisterReply, SampleAck, SampleChunk, WorkerHello, ShuffleDone, ShuffleDoneAck}
 
 object MasterService {
 
@@ -70,27 +70,15 @@ object MasterService {
     }
 
     override def sendSample(req: SampleChunk): Future[SampleAck] = {
-      val recs = decodeSampleBytes(req.data.toByteArray)
+      val recs = Record.decodeBytes(req.data.toByteArray)
       MasterState.addSamples(req.workerId, recs)
       println(s"[SAMPLE] workerId=${req.workerId}, received=${recs.size} samples")
 
-      maybeComputePartitionPlan()
+      Future {
+        maybeComputePartitionPlan()
+      }
 
       Future.successful(SampleAck(ok = true))
-    }
-
-    private def decodeSampleBytes(bytes: Array[Byte]): Vector[Record] = {
-      val recSize = Record.RecordSize
-      val count   = bytes.length / recSize
-      val buf     = Vector.newBuilder[Record]
-
-      var i = 0
-      while (i < count) {
-        val slice = java.util.Arrays.copyOfRange(bytes, i * recSize, (i + 1) * recSize)
-        buf += Record.fromBytes(slice)
-        i += 1
-      }
-      buf.result()
     }
 
 
@@ -119,16 +107,31 @@ object MasterService {
           ()
       }
     }
+
+    override def notifyShuffleDone(req: ShuffleDone): Future[ShuffleDoneAck] = {
+      MasterState.markShuffleDone(req.workerId)
+
+      val done      = MasterState.shuffleDoneCount
+      val expected  = MasterState.expected.map(_.toString).getOrElse("?")
+      println(s"[BARRIER] shuffle done from workerId=${req.workerId} ($done/$expected)")
+
+      if (MasterState.allShuffleDone) {
+        println("[BARRIER] all workers finished shuffle; sending StartMerge to all workers")
+        Future {
+          MasterService.sendStartMerge()
+        }
+      }
+
+      Future.successful(ShuffleDoneAck(ok = true))
+    }
   }
 
   private def sendPartitionPlan(plan: PartitionPlan): Unit = {
     val pivotKeys: Seq[ByteString] =
       plan.pivots.map(p => ByteString.copyFrom(p.key))
 
-    // 등록된 워커 목록 (등록 순서)
     val workers = MasterState.allWorkers
 
-    // partitionIdx = i 는 workers(i) 가 owner 라는 규칙
     val endpoints: Seq[WorkerEndpoint] =
       workers.map { w =>
         WorkerEndpoint(
@@ -160,5 +163,23 @@ object MasterService {
     }
   }
 
+  private def sendStartMerge(): Unit = {
+    MasterState.allWorkers.foreach { w =>
+      val (ch, stub) = GrpcClients.workerClient(w.host, w.port)
+
+      try {
+        val ack = Await.result(stub.startMerge(StartMergeMsg()), 30.seconds)
+        println(s"[BARRIER] sent StartMerge to ${w.workerId}, ack.ok=${ack.ok}")
+      } catch {
+        case e: Throwable =>
+          println(s"[BARRIER] failed to send StartMerge to worker ${w.workerId}: ${e.getMessage}")
+      } finally {
+        ch.shutdownNow()
+      }
+    }
+
+    println("[MASTER] all workers finished merge; shutting down master.")
+    System.exit(0)
+  }
 
 }
