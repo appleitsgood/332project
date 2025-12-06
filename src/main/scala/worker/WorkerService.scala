@@ -5,12 +5,10 @@ import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Await
 import scala.concurrent.duration._
 
-import java.nio.file.{Files, Paths}
-
 import com.google.protobuf.ByteString
 import common.{PartitionPlan, Record}
 import network.GrpcClients
-import sorting.Partitioner
+import sorting.{Partitioner, Merger}
 import common.RecordStream
 import common.KeyOrdering._
 import sorting.v1.sort.{WorkerServiceGrpc, PartitionPlanMsg, PartitionAck, PartitionChunk, PartitionChunkAck, StartMergeMsg, StartMergeAck, ShuffleDone, ShuffleDoneAck}
@@ -232,9 +230,6 @@ class WorkerService extends WorkerServiceGrpc.WorkerService {
     val selfId = selfIdOpt.get
     val plan = planOpt.get
 
-    val outPath = Paths.get(outputDir)
-    Files.createDirectories(outPath)
-
     val ownedPartitions: Seq[Int] =
       (0 until plan.numPartitions).flatMap { idx =>
         WorkerState.ownerOfPartition(idx) match {
@@ -248,14 +243,6 @@ class WorkerService extends WorkerServiceGrpc.WorkerService {
       return
     }
 
-    ownedPartitions.sorted.foreach { partitionIndex =>
-      val records: Vector[Record] = WorkerState.getPartition(partitionIndex)
-      val sorted = records.sorted
-
-      val filePath = outPath.resolve(s"partition.$partitionIndex").toString
-      Record.writeFile(filePath, sorted)
-
-      println(s"[MERGE] wrote ${sorted.size} records to $filePath (partitionIdx=$partitionIndex)")
-    }
+    Merger.writePartitions(outputDir, ownedPartitions.sorted, idx => WorkerState.getPartition(idx))
   }
 }
