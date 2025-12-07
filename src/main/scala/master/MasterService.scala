@@ -4,6 +4,7 @@ import com.google.protobuf.ByteString
 
 import scala.concurrent.{Future, Await}
 import scala.concurrent.duration._
+import scala.concurrent.ExecutionContext.Implicits.global
 
 import common.{PartitionPlan, Record}
 import network.{GrpcClients, GrpcServers}

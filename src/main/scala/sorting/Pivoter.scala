@@ -6,7 +6,7 @@ import common.KeyOrdering
 object Pivoter {
 
   def choosePivots(samplesByWorker: Seq[Seq[Record]], numWorkers: Int): Vector[Record] = {
-    require(numWorkers >= 2, "numWorkers must be >= 2")
+    if (numWorkers <= 1) return Vector.empty
 
     val allSamples = samplesByWorker.flatten.sorted(KeyOrdering.recordOrdering)
     if (allSamples.isEmpty) return Vector.empty

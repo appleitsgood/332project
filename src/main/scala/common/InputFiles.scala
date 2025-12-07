@@ -9,9 +9,14 @@ object InputFiles {
       sys.error(s"Input path not found: $path")
     }
     if (f.isDirectory) {
-      f.listFiles()
-        .filter(_.isFile)
-        .sortBy(_.getName)
+      val files = f.listFiles()
+      if (files == null) {
+        Seq.empty
+      } else {
+        val onlyFiles = files.iterator.filter(_.isFile).toArray
+        val sorted    = onlyFiles.sortBy(_.getName)
+        sorted.toSeq
+      }
     } else {
       Seq(f)
     }

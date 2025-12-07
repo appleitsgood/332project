@@ -11,10 +11,11 @@ import network.GrpcClients
 import sorting.{Partitioner, Merger}
 import common.RecordStream
 import common.KeyOrdering._
+import scala.collection.mutable.Builder
 import sorting.v1.sort.{WorkerServiceGrpc, PartitionPlanMsg, PartitionAck, PartitionChunk, PartitionChunkAck, StartMergeMsg, StartMergeAck, ShuffleDone, ShuffleDoneAck}
 
 class WorkerService extends WorkerServiceGrpc.WorkerService {
-  private val ShuffleChunkBytes   = 4 * 1024 * 1024
+  private val ShuffleChunkBytes   = 3 * 1024 * 1024 + 512 * 1024 // 3.5MB
   private val RecordSize          = Record.RecordSize
 
   override def receivePartitionPlan(req: PartitionPlanMsg): Future[PartitionAck] = {
@@ -70,15 +71,9 @@ class WorkerService extends WorkerServiceGrpc.WorkerService {
       return
     }
 
-    val buffers: Array[scala.collection.mutable.Builder[Record, Vector[Record]]] =
-      new Array[scala.collection.mutable.Builder[Record, Vector[Record]]](numPartitions)
+    val buffers: Array[Builder[Record, Vector[Record]]] =
+      Array.fill[Builder[Record, Vector[Record]]](numPartitions)(Vector.newBuilder[Record])
     val counts = Array.fill(numPartitions)(0)
-
-    var bufferIndex = 0
-    while (bufferIndex < numPartitions) {
-      buffers(bufferIndex) = Vector.newBuilder[Record]
-      bufferIndex += 1
-    }
 
     RecordStream.forEachRecord(inputFiles, ShuffleChunkBytes, warnOnPartial = true) { record =>
       val partitionIndex = Partitioner.partitionIndex(record, pivots)
