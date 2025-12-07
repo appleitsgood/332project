@@ -3,7 +3,6 @@ package master
 import com.google.protobuf.ByteString
 
 import scala.concurrent.{Future, Await}
-import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration._
 
 import common.{PartitionPlan, Record}
@@ -13,34 +12,6 @@ import sorting.v1.sort.{WorkerServiceGrpc, PartitionPlanMsg, WorkerEndpoint, Sta
 import sorting.v1.sort.{MasterServiceGrpc, RegisterReply, SampleAck, SampleChunk, WorkerHello, ShuffleDone, ShuffleDoneAck}
 
 object MasterService {
-
-  def main(args: Array[String]): Unit = {
-    val expectedWorkers: Option[Int] =
-      args.headOption.map(_.toInt)
-
-    MasterState.init(expectedWorkers)
-
-    val configuredPort = sys.props.get("port").map(_.toInt).getOrElse(0)
-
-    val server = GrpcServers.masterServer(configuredPort, new Impl)
-      .start()
-
-    val actualPort = server.getPort
-    val host       = java.net.InetAddress.getLocalHost.getHostAddress
-
-    println(s"[MASTER] Listening on $host:$actualPort")
-    expectedWorkers match {
-      case Some(n) => println(s"[MASTER] Waiting for $n workers to register...")
-      case None    => println(s"[MASTER] Waiting for workers to register (no fixed count).")
-    }
-
-    sys.addShutdownHook {
-      println("[MASTER] Shutting down gRPC server...")
-      server.shutdown()
-    }
-
-    server.awaitTermination()
-  }
 
   class Impl extends MasterServiceGrpc.MasterService {
 
