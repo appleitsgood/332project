@@ -10,7 +10,7 @@ import common.{PartitionPlan, Record}
 import network.{GrpcClients, GrpcServers}
 import sorting.Pivoter
 import sorting.v1.sort.{WorkerServiceGrpc, PartitionPlanMsg, WorkerEndpoint, StartMergeMsg, StartMergeAck}
-import sorting.v1.sort.{MasterServiceGrpc, RegisterReply, SampleAck, SampleChunk, WorkerHello, ShuffleDone, ShuffleDoneAck}
+import sorting.v1.sort.{MasterServiceGrpc, RegisterReply, SampleAck, SampleChunk, WorkerHello, ShuffleDone, ShuffleDoneAck, MergeDone, MergeDoneAck}
 import org.slf4j.LoggerFactory
 
 object MasterService {
@@ -102,6 +102,19 @@ object MasterService {
 
       Future.successful(ShuffleDoneAck(ok = true))
     }
+
+    override def notifyMergeDone(req: MergeDone): Future[MergeDoneAck] = {
+      MasterState.markMergeDone(req.workerId)
+      val done     = MasterState.mergeDoneCount
+      val expected = MasterState.expected.map(_.toString).getOrElse("?")
+      log.info(s"[MERGE] merge done from workerId=${req.workerId} ($done/$expected)")
+
+      if (MasterState.allMergeDone) {
+        MasterService.finishAndExit()
+      }
+
+      Future.successful(MergeDoneAck(ok = true))
+    }
   }
 
   private def sendPartitionPlan(plan: PartitionPlan): Unit = {
@@ -157,7 +170,11 @@ object MasterService {
         ch.shutdownNow()
       }
     }
+    log.info("[BARRIER] StartMerge sent to all workers; waiting for merge completion reports")
+  }
 
+  private def finishAndExit(): Unit = {
+    val log = LoggerFactory.getLogger(getClass)
     val totalMillis = MasterState.getStartNanos.map { start =>
       (System.nanoTime() - start) / 1000000L
     }.getOrElse(-1L)
@@ -176,5 +193,4 @@ object MasterService {
     }
     System.exit(0)
   }
-
 }

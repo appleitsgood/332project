@@ -6,6 +6,7 @@ service MasterService {
   rpc RegisterWorker(WorkerHello) returns (RegisterReply);
   rpc SendSample(SampleChunk) returns (SampleAck);
   rpc NotifyShuffleDone(ShuffleDone) returns (ShuffleDoneAck);
+  rpc NotifyMergeDone(MergeDone) returns (MergeDoneAck);
 }
 
 service WorkerService {
@@ -71,5 +72,13 @@ message StartMergeMsg {
 }
 
 message StartMergeAck {
+  bool ok = 1;
+}
+
+message MergeDone {
+  string workerId = 1;
+}
+
+message MergeDoneAck {
   bool ok = 1;
 }

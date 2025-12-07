@@ -12,6 +12,7 @@ object MasterState {
   @volatile private var shuffleDone: Set[String]               = Set.empty
   @volatile private var startNanos: Option[Long]               = None
   @volatile private var allRegisteredNanos: Option[Long]       = None
+  @volatile private var mergeDone: Set[String]                 = Set.empty
 
   def init(expected: Option[Int]): Unit = synchronized {
     expectedWorkers = expected
@@ -21,6 +22,7 @@ object MasterState {
     shuffleDone    = Set.empty
     startNanos     = None
     allRegisteredNanos = None
+    mergeDone      = Set.empty
   }
 
   def addWorker(w: WorkerInfo): Int = synchronized {
@@ -60,4 +62,13 @@ object MasterState {
     allRegisteredNanos = Some(nanos)
   }
   def getAllRegisteredNanos: Option[Long] = allRegisteredNanos
+
+  def markMergeDone(workerId: String): Unit = synchronized {
+    mergeDone = mergeDone + workerId
+  }
+
+  def mergeDoneCount: Int = mergeDone.size
+
+  def allMergeDone: Boolean =
+    expectedWorkers.exists(total => mergeDone.size == total)
 }

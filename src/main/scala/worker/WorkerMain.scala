@@ -76,6 +76,8 @@ object WorkerMain {
 
     WorkerState.setMasterEndpoint(masterHost, masterPort)
     WorkerState.setOutputDir(outputDir)
+    val tmpDir = new java.io.File(outputDir, ".tmp")
+    WorkerState.setTempDir(tmpDir)
 
     val inputFiles =
       InputFiles.listInputFiles(inputPath).map(_.getAbsolutePath).toVector

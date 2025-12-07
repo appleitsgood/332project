@@ -43,3 +43,8 @@ src/main/scala/TestLocalSort.scala
 
 # .exe files
 *.exe
+
+test_scripts/
+vm1/
+vm2/
+vm3/
