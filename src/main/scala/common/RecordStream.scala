@@ -1,6 +1,9 @@
 package common
 
+import org.slf4j.LoggerFactory
+
 object RecordStream {
+  private val log = LoggerFactory.getLogger(getClass)
 
   def forEachRecord(paths: Seq[String], blockSize: Int, warnOnPartial: Boolean)
                    (handler: Record => Unit): Unit = {
@@ -48,7 +51,7 @@ object RecordStream {
       }
 
       if (leftover.nonEmpty && warnOnPartial) {
-        println(s"[RecordStream] WARNING: leftover ${leftover.length} bytes in file $path (ignored)")
+        log.warn(s"[RecordStream] WARNING: leftover ${leftover.length} bytes in file $path (ignored)")
       }
 
       pathIdx += 1

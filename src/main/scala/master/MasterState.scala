@@ -10,6 +10,8 @@ object MasterState {
   @volatile private var samples: Map[String, Vector[Record]]   = Map.empty
   @volatile private var partitionPlan: Option[PartitionPlan]   = None
   @volatile private var shuffleDone: Set[String]               = Set.empty
+  @volatile private var startNanos: Option[Long]               = None
+  @volatile private var allRegisteredNanos: Option[Long]       = None
 
   def init(expected: Option[Int]): Unit = synchronized {
     expectedWorkers = expected
@@ -17,6 +19,8 @@ object MasterState {
     samples        = Map.empty
     partitionPlan  = None
     shuffleDone    = Set.empty
+    startNanos     = None
+    allRegisteredNanos = None
   }
 
   def addWorker(w: WorkerInfo): Int = synchronized {
@@ -48,4 +52,12 @@ object MasterState {
 
   def allShuffleDone: Boolean =
     expectedWorkers.exists(total => shuffleDone.size == total)
+
+  def setStartNanos(nanos: Long): Unit = synchronized { startNanos = Some(nanos) }
+  def getStartNanos: Option[Long] = startNanos
+
+  def markAllRegistered(nanos: Long): Unit = synchronized {
+    allRegisteredNanos = Some(nanos)
+  }
+  def getAllRegisteredNanos: Option[Long] = allRegisteredNanos
 }

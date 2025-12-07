@@ -12,6 +12,9 @@ object WorkerState {
   @volatile private var outputDir: Option[String]                      = None
   @volatile private var masterEndpoint: Option[(String, Int)]          = None
   @volatile private var inputFiles: Vector[String]                     = Vector.empty
+  @volatile private var sampleMillis: Option[Long]                     = None
+  @volatile private var shuffleMillis: Option[Long]                    = None
+  @volatile private var mergeMillis: Option[Long]                      = None
 
   def setPartitionPlan(plan: PartitionPlan): Unit = synchronized {
     partitionPlan = Some(plan)
@@ -54,4 +57,13 @@ object WorkerState {
     inputFiles = paths
   }
   def getInputFiles: Vector[String] = inputFiles
+
+  def setSampleMillis(ms: Long): Unit = synchronized { sampleMillis = Some(ms) }
+  def getSampleMillis: Option[Long] = sampleMillis
+
+  def setShuffleMillis(ms: Long): Unit = synchronized { shuffleMillis = Some(ms) }
+  def getShuffleMillis: Option[Long] = shuffleMillis
+
+  def setMergeMillis(ms: Long): Unit = synchronized { mergeMillis = Some(ms) }
+  def getMergeMillis: Option[Long] = mergeMillis
 }

@@ -35,5 +35,9 @@ libraryDependencies ++= Seq(
 
   // gRPC runtime
   "io.grpc" % "grpc-netty-shaded" % "1.56.1",
-  "com.thesamet.scalapb" %% "scalapb-runtime-grpc" % scalapb.compiler.Version.scalapbVersion
+  "com.thesamet.scalapb" %% "scalapb-runtime-grpc" % scalapb.compiler.Version.scalapbVersion,
+
+  // Logging
+  "org.slf4j" % "slf4j-api" % "1.7.36",
+  "ch.qos.logback" % "logback-classic" % "1.2.12"
 )

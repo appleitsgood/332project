@@ -1,8 +1,11 @@
 package master
 
+import org.slf4j.LoggerFactory
+
 object MasterMain {
   def main(args: Array[String]): Unit = {
     implicit val ec: scala.concurrent.ExecutionContext = scala.concurrent.ExecutionContext.global
+    val log = LoggerFactory.getLogger(getClass)
 
     val expectedWorkers: Option[Int] =
       args.headOption.map(_.toInt)
@@ -17,14 +20,14 @@ object MasterMain {
     val actualPort = server.getPort
     val host       = java.net.InetAddress.getLocalHost.getHostAddress
 
-    println(s"[MASTER] Listening on $host:$actualPort")
+    log.info(s"[MASTER] Listening on $host:$actualPort")
     expectedWorkers match {
-      case Some(n) => println(s"[MASTER] Waiting for $n workers to register...")
-      case None    => println(s"[MASTER] Waiting for workers to register (no fixed count).")
+      case Some(n) => log.info(s"[MASTER] Waiting for $n workers to register...")
+      case None    => log.info(s"[MASTER] Waiting for workers to register (no fixed count).")
     }
 
     sys.addShutdownHook {
-      println("[MASTER] Shutting down gRPC server...")
+      log.info("[MASTER] Shutting down gRPC server...")
       server.shutdown()
     }
 

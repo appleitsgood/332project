@@ -3,8 +3,10 @@ package sorting
 import java.nio.file.{Files, Paths}
 import common.{Record}
 import common.KeyOrdering._
+import org.slf4j.LoggerFactory
 
 object Merger {
+  private val log = LoggerFactory.getLogger(getClass)
 
   def writePartitions(outputDir: String,
                       ownedPartitions: Seq[Int],
@@ -22,7 +24,7 @@ object Merger {
       val filePath = outPath.resolve(s"partition.$partitionIndex").toString
       Record.writeFile(filePath, sorted)
 
-      println(s"[MERGE] wrote ${sorted.size} records to $filePath (partitionIdx=$partitionIndex)")
+      log.info(s"[MERGE] wrote ${sorted.size} records to $filePath (partitionIdx=$partitionIndex)")
       idx += 1
     }
   }

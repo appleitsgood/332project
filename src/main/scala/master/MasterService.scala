@@ -11,28 +11,30 @@ import network.{GrpcClients, GrpcServers}
 import sorting.Pivoter
 import sorting.v1.sort.{WorkerServiceGrpc, PartitionPlanMsg, WorkerEndpoint, StartMergeMsg, StartMergeAck}
 import sorting.v1.sort.{MasterServiceGrpc, RegisterReply, SampleAck, SampleChunk, WorkerHello, ShuffleDone, ShuffleDoneAck}
+import org.slf4j.LoggerFactory
 
 object MasterService {
 
   class Impl extends MasterServiceGrpc.MasterService {
+    private val log = LoggerFactory.getLogger(getClass)
 
     override def registerWorker(r: WorkerHello): Future[RegisterReply] = {
       val info  = WorkerInfo(r.workerId, r.host, r.port)
       val count = MasterState.addWorker(info)
 
       val expectedStr = MasterState.expected.map(_.toString).getOrElse("?")
-      println(s"[REGISTER] workerId=${r.workerId} host=${r.host}:${r.port} " +
+      log.info(s"[REGISTER] workerId=${r.workerId} host=${r.host}:${r.port} " +
         s"($count/$expectedStr)")
 
       MasterState.expected.foreach { total =>
         if (count == total) {
-          println()
-          println("=== ALL WORKERS REGISTERED ===")
+          log.info("")
+          log.info("=== ALL WORKERS REGISTERED ===")
           MasterState.allWorkers.zipWithIndex.foreach { case (w, idx) =>
-            println(f"[$idx%02d] ${w.workerId}  ${w.host}:${w.port}")
+            log.info(f"[$idx%02d] ${w.workerId}  ${w.host}:${w.port}")
           }
-          println("================================")
-          println()
+          log.info("================================")
+          log.info("")
         }
       }
 
@@ -44,7 +46,7 @@ object MasterService {
     override def sendSample(req: SampleChunk): Future[SampleAck] = {
       val recs = Record.decodeBytes(req.data.toByteArray)
       MasterState.addSamples(req.workerId, recs)
-      println(s"[SAMPLE] workerId=${req.workerId}, received=${recs.size} samples")
+      log.info(s"[SAMPLE] workerId=${req.workerId}, received=${recs.size} samples")
 
       Future {
         maybeComputePartitionPlan()
@@ -57,21 +59,25 @@ object MasterService {
     private def maybeComputePartitionPlan(): Unit = {
       (MasterState.expected, MasterState.samplingCompleteWorkers) match {
         case (Some(totalWorkers), sampleWorkers) if sampleWorkers == totalWorkers =>
-          println(s"[SAMPLE] all samples collected from $sampleWorkers workers")
+          log.info(s"[SAMPLE] all samples collected from $sampleWorkers workers")
+          if (MasterState.getStartNanos.isEmpty) {
+            MasterState.markAllRegistered(System.nanoTime())
+            MasterState.setStartNanos(System.nanoTime())
+          }
 
           val samplesByWorker: Seq[Seq[Record]] =
             MasterState.allSamplesByWorker.values.toSeq
 
           val pivots = Pivoter.choosePivots(samplesByWorker, totalWorkers)
-          println(s"[PIVOT] computed ${pivots.size} pivots")
+          log.info(s"[PIVOT] computed ${pivots.size} pivots")
 
           val plan = PartitionPlan.fromPivots(pivots)
           MasterState.setPartitionPlan(plan)
-          println(s"[PLAN] numPartitions=${plan.numPartitions}")
+          log.info(s"[PLAN] numPartitions=${plan.numPartitions}")
 
           pivots.zipWithIndex.foreach { case (p, idx) =>
             val keyStr = new String(p.key, "US-ASCII")
-            println(f"  pivot[$idx%02d] = $keyStr")
+            log.info(f"  pivot[$idx%02d] = $keyStr")
           }
 
           MasterService.sendPartitionPlan(plan)
@@ -85,10 +91,10 @@ object MasterService {
 
       val done      = MasterState.shuffleDoneCount
       val expected  = MasterState.expected.map(_.toString).getOrElse("?")
-      println(s"[BARRIER] shuffle done from workerId=${req.workerId} ($done/$expected)")
+      log.info(s"[BARRIER] shuffle done from workerId=${req.workerId} ($done/$expected)")
 
       if (MasterState.allShuffleDone) {
-        println("[BARRIER] all workers finished shuffle; sending StartMerge to all workers")
+        log.info("[BARRIER] all workers finished shuffle; sending StartMerge to all workers")
         Future {
           MasterService.sendStartMerge()
         }
@@ -99,6 +105,7 @@ object MasterService {
   }
 
   private def sendPartitionPlan(plan: PartitionPlan): Unit = {
+    val log = LoggerFactory.getLogger(getClass)
     val pivotKeys: Seq[ByteString] =
       plan.pivots.map(p => ByteString.copyFrom(p.key))
 
@@ -119,16 +126,16 @@ object MasterService {
     )
 
     workers.foreach { w =>
-      println(s"[PLAN] sending PartitionPlan to worker ${w.workerId} at ${w.host}:${w.port}")
+      log.info(s"[PLAN] sending PartitionPlan to worker ${w.workerId} at ${w.host}:${w.port}")
 
       val (ch, stub) = GrpcClients.workerClient(w.host, w.port)
 
       try {
         val ack = Await.result(stub.receivePartitionPlan(msg), 5.seconds)
-        println(s"[PLAN] worker=${w.workerId} ack.ok=${ack.ok}")
+        log.info(s"[PLAN] worker=${w.workerId} ack.ok=${ack.ok}")
       } catch {
         case e: Throwable =>
-          println(s"[PLAN] failed to send plan to worker ${w.workerId}: ${e.getMessage}")
+          log.error(s"[PLAN] failed to send plan to worker ${w.workerId}: ${e.getMessage}")
       } finally {
         ch.shutdownNow()
       }
@@ -136,21 +143,37 @@ object MasterService {
   }
 
   private def sendStartMerge(): Unit = {
+    val log = LoggerFactory.getLogger(getClass)
     MasterState.allWorkers.foreach { w =>
       val (ch, stub) = GrpcClients.workerClient(w.host, w.port)
 
       try {
         val ack = Await.result(stub.startMerge(StartMergeMsg()), 30.seconds)
-        println(s"[BARRIER] sent StartMerge to ${w.workerId}, ack.ok=${ack.ok}")
+        log.info(s"[BARRIER] sent StartMerge to ${w.workerId}, ack.ok=${ack.ok}")
       } catch {
         case e: Throwable =>
-          println(s"[BARRIER] failed to send StartMerge to worker ${w.workerId}: ${e.getMessage}")
+          log.error(s"[BARRIER] failed to send StartMerge to worker ${w.workerId}: ${e.getMessage}")
       } finally {
         ch.shutdownNow()
       }
     }
 
-    println("[MASTER] all workers finished merge; shutting down master.")
+    val totalMillis = MasterState.getStartNanos.map { start =>
+      (System.nanoTime() - start) / 1000000L
+    }.getOrElse(-1L)
+    val registeredMillis = MasterState.getAllRegisteredNanos.map { registered =>
+      (System.nanoTime() - registered) / 1000000L
+    }.getOrElse(-1L)
+
+    if (totalMillis >= 0) {
+      if (registeredMillis >= 0) {
+        log.info(s"[MASTER] all workers finished merge; total=${totalMillis} ms since start; elapsed since all registered=${registeredMillis} ms; shutting down master.")
+      } else {
+        log.info(s"[MASTER] all workers finished merge; total=${totalMillis} ms; shutting down master.")
+      }
+    } else {
+      log.info("[MASTER] all workers finished merge; shutting down master.")
+    }
     System.exit(0)
   }
 

@@ -12,9 +12,11 @@ import sorting.{Partitioner, Merger}
 import common.RecordStream
 import common.KeyOrdering._
 import scala.collection.mutable.Builder
+import org.slf4j.LoggerFactory
 import sorting.v1.sort.{WorkerServiceGrpc, PartitionPlanMsg, PartitionAck, PartitionChunk, PartitionChunkAck, StartMergeMsg, StartMergeAck, ShuffleDone, ShuffleDoneAck}
 
 class WorkerService extends WorkerServiceGrpc.WorkerService {
+  private val log = LoggerFactory.getLogger(getClass)
   private val ShuffleChunkBytes   = 3 * 1024 * 1024 + 512 * 1024 // 3.5MB
   private val RecordSize          = Record.RecordSize
 
@@ -40,12 +42,12 @@ class WorkerService extends WorkerServiceGrpc.WorkerService {
         }.toVector
 
       WorkerState.setWorkers(workers)
-      println(s"[WORKER] received ${workers.size} worker endpoints for ${plan.numPartitions} partitions")
+      log.info(s"[WORKER] received ${workers.size} worker endpoints for ${plan.numPartitions} partitions")
     } else {
-      println("[WORKER] warning: received PartitionPlan with no worker endpoints")
+      log.warn("[WORKER] warning: received PartitionPlan with no worker endpoints")
     }
 
-    println(s"[WORKER] received PartitionPlan: pivots=${pivots.size}, numPartitions=${plan.numPartitions}")
+    log.info(s"[WORKER] received PartitionPlan: pivots=${pivots.size}, numPartitions=${plan.numPartitions}")
 
     streamShuffle(inputFiles = WorkerState.getInputFiles, pivots = pivots, plan = plan)
 
@@ -56,20 +58,22 @@ class WorkerService extends WorkerServiceGrpc.WorkerService {
   private def streamShuffle(inputFiles: Vector[String], pivots: Vector[Record], plan: PartitionPlan): Unit = {
     val selfIdOpt = WorkerState.getLocalWorkerId
     val selfId    = selfIdOpt.getOrElse {
-      println("[WORKER] WARNING: localWorkerId is not set; using 'unknown'")
+      log.warn("[WORKER] WARNING: localWorkerId is not set; using 'unknown'")
       "unknown"
     }
 
     if (inputFiles.isEmpty) {
-      println("[WORKER] WARNING: no input files set; skipping shuffle")
+      log.warn("[WORKER] WARNING: no input files set; skipping shuffle")
       return
     }
 
     val numPartitions = plan.numPartitions
     if (WorkerState.allWorkers.isEmpty) {
-      println("[WORKER] WARNING: no worker endpoints; cannot shuffle")
+      log.warn("[WORKER] WARNING: no worker endpoints; cannot shuffle")
       return
     }
+
+    val shuffleStart = System.nanoTime()
 
     val buffers: Array[Builder[Record, Vector[Record]]] =
       Array.fill[Builder[Record, Vector[Record]]](numPartitions)(Vector.newBuilder[Record])
@@ -91,10 +95,14 @@ class WorkerService extends WorkerServiceGrpc.WorkerService {
       }
       partitionIndex += 1
     }
+
+    val shuffleMillis = (System.nanoTime() - shuffleStart) / 1000000L
+    WorkerState.setShuffleMillis(shuffleMillis)
+    log.info(s"[SHUFFLE] completed in ${shuffleMillis} ms")
   }
 
   private def flushPartition(partitionIndex: Int,
-                             buffers: Array[scala.collection.mutable.Builder[Record, Vector[Record]]],
+                             buffers: Array[Builder[Record, Vector[Record]]],
                              counts: Array[Int],
                              selfId: String): Unit = {
 
@@ -104,13 +112,13 @@ class WorkerService extends WorkerServiceGrpc.WorkerService {
       WorkerState.ownerOfPartition(partitionIndex) match {
         case Some(owner) if owner.workerId == selfId =>
           WorkerState.addPartitionChunk(partitionIndex, chunk)
-          println(s"[SHUFFLE] kept local partitionIdx=$partitionIndex, records=${chunk.size}")
+          log.info(s"[SHUFFLE] kept local partitionIdx=$partitionIndex, records=${chunk.size}")
 
         case Some(owner) =>
           sendPartitionChunk(owner.host, owner.port, selfId, partitionIndex, chunk)
 
         case None =>
-          println(s"[SHUFFLE] WARNING: no owner for partitionIdx=$partitionIndex; dropping ${chunk.size} records")
+          log.warn(s"[SHUFFLE] WARNING: no owner for partitionIdx=$partitionIndex; dropping ${chunk.size} records")
       }
     }
 
@@ -136,12 +144,12 @@ class WorkerService extends WorkerServiceGrpc.WorkerService {
       )
 
       val ack = Await.result(stub.receivePartitionChunk(req), 30.seconds)
-      println(s"[SHUFFLE] sent partitionIdx=$partitionIndex, records=${records.size} " +
+      log.info(s"[SHUFFLE] sent partitionIdx=$partitionIndex, records=${records.size} " +
         s"to $host:$port (from=$fromWorkerId), ack.ok=${ack.ok}")
 
     } catch {
       case e: Throwable =>
-        println(s"[SHUFFLE] ERROR: failed to send partitionIdx=$partitionIndex to $host:$port: ${e.getMessage}")
+        log.error(s"[SHUFFLE] ERROR: failed to send partitionIdx=$partitionIndex to $host:$port: ${e.getMessage}")
     } finally {
       ch.shutdownNow()
     }
@@ -151,7 +159,7 @@ class WorkerService extends WorkerServiceGrpc.WorkerService {
     val records: Vector[Record] = Record.decodeBytes(req.data.toByteArray)
     WorkerState.addPartitionChunk(req.partitionIdx, records)
 
-    println(s"[WORKER] received PartitionChunk from=${req.fromWorkerId}, " +
+    log.info(s"[WORKER] received PartitionChunk from=${req.fromWorkerId}, " +
       s"partitionIdx=${req.partitionIdx}, records=${records.size}")
 
     Future.successful(PartitionChunkAck(ok = true))
@@ -167,35 +175,39 @@ class WorkerService extends WorkerServiceGrpc.WorkerService {
         try {
           val req = ShuffleDone(workerId = workerId)
           val ack = Await.result(stub.notifyShuffleDone(req), 30.seconds)
-          println(s"[BARRIER] notified master of shuffle done, ack.ok=${ack.ok}")
+          log.info(s"[BARRIER] notified master of shuffle done, ack.ok=${ack.ok}")
         } catch {
           case e: Throwable =>
-            println(s"[BARRIER] failed to notify master of shuffle done: ${e.getMessage}")
+            log.error(s"[BARRIER] failed to notify master of shuffle done: ${e.getMessage}")
         } finally {
           ch.shutdownNow()
         }
       case _ =>
-        println("[BARRIER] WARNING: master endpoint or local workerId not set; cannot notify shuffle done")
+        log.warn("[BARRIER] WARNING: master endpoint or local workerId not set; cannot notify shuffle done")
     }
   }
 
   override def startMerge(req: StartMergeMsg): Future[StartMergeAck] = {
-    println("[MERGE] StartMerge received. Merging owned partitions and writing output files...")
+    log.info("[MERGE] StartMerge received. Merging owned partitions and writing output files...")
 
     val fut: Future[StartMergeAck] = Future {
+      val mergeStart = System.nanoTime()
       try {
         mergeAndWriteOutputs()
-        println("[MERGE] done.")
+        val mergeMillis = (System.nanoTime() - mergeStart) / 1000000L
+        WorkerState.setMergeMillis(mergeMillis)
+        log.info(s"[MERGE] done in ${mergeMillis} ms.")
+        logPhaseSummary()
         StartMergeAck(ok = true)
       } catch {
         case e: Throwable =>
-          println(s"[MERGE] ERROR during merge: ${e.getMessage}")
+          log.error(s"[MERGE] ERROR during merge: ${e.getMessage}")
           StartMergeAck(ok = false)
       }
     }
 
     fut.andThen { case _ =>
-      println("[MERGE] worker shutting down.")
+      log.info("[MERGE] worker shutting down.")
       Thread.sleep(100)
       System.exit(0)
     }
@@ -209,15 +221,15 @@ class WorkerService extends WorkerServiceGrpc.WorkerService {
     val planOpt = WorkerState.getPartitionPlan
 
     if (outDirOpt.isEmpty) {
-      println("[MERGE] WARNING: outputDir is not set; skip merge.")
+      log.warn("[MERGE] WARNING: outputDir is not set; skip merge.")
       return
     }
     if (selfIdOpt.isEmpty) {
-      println("[MERGE] WARNING: localWorkerId is not set; skip merge.")
+      log.warn("[MERGE] WARNING: localWorkerId is not set; skip merge.")
       return
     }
     if (planOpt.isEmpty) {
-      println("[MERGE] WARNING: partitionPlan is not set; skip merge.")
+      log.warn("[MERGE] WARNING: partitionPlan is not set; skip merge.")
       return
     }
 
@@ -234,10 +246,22 @@ class WorkerService extends WorkerServiceGrpc.WorkerService {
       }
 
     if (ownedPartitions.isEmpty) {
-      println(s"[MERGE] WARNING: no owned partitions for workerId=$selfId")
+      log.warn(s"[MERGE] WARNING: no owned partitions for workerId=$selfId")
       return
     }
 
     Merger.writePartitions(outputDir, ownedPartitions.sorted, idx => WorkerState.getPartition(idx))
+  }
+
+  private def logPhaseSummary(): Unit = {
+    val sampleMs  = WorkerState.getSampleMillis.getOrElse(-1L)
+    val shuffleMs = WorkerState.getShuffleMillis.getOrElse(-1L)
+    val mergeMs   = WorkerState.getMergeMillis.getOrElse(-1L)
+
+    val sampleStr  = if (sampleMs >= 0) s"${sampleMs} ms" else "n/a"
+    val shuffleStr = if (shuffleMs >= 0) s"${shuffleMs} ms" else "n/a"
+    val mergeStr   = if (mergeMs >= 0) s"${mergeMs} ms" else "n/a"
+
+    log.info(s"[PHASE] sample=$sampleStr, shuffle=$shuffleStr, merge=$mergeStr")
   }
 }
