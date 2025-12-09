@@ -1,5 +1,7 @@
 # Distributed Sort (Master–Worker)
 
+https://www.miricanvas.com/login?redirect=%2Fv2%2Fdesign2%2Ffe8b0eff-3c3e-458b-9da8-2367a0eba885
+
 This project implements a distributed sort with a Master/Worker architecture over gRPC (ScalaPB).
 This README focuses on **how to build and run** the system (locally and over SSH).
 * Note that fault tolerance is not yet implemented.
